@@ -142,6 +142,25 @@ addEventListener('keydown',e=>{
   if(e.key==='Escape'&&cfg().escLock){if(typing){t.blur();return}e.preventDefault();lockApp()}
 });
 
+/* ---------- breach check (k-anonymity, Have I Been Pwned) ---------- */
+// Only the first 5 hex chars of SHA-1(password) leave the device; suffix matching happens locally.
+async function pwnedCount(pw){
+  const h=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-1',enc.encode(pw))),x=>x.toString(16).padStart(2,'0')).join('').toUpperCase();
+  const pre=h.slice(0,5),suf=h.slice(5);
+  const r=await fetch('https://api.pwnedpasswords.com/range/'+pre,{headers:{'Add-Padding':'true'},cache:'no-store',referrerPolicy:'no-referrer',credentials:'omit'});
+  if(!r.ok)throw new Error('HTTP '+r.status);
+  for(const line of (await r.text()).split('\n')){const [s,c]=line.trim().split(':');if(s===suf)return parseInt(c,10)||0}
+  return 0;
+}
+async function checkPwned(){
+  const e=sel(),box=$('#pwn');if(!e||!box)return;
+  box.className='note';box.textContent='Checking… only a 5-character hash prefix is sent.';
+  try{const n=await pwnedCount(e.password);if(sel()?.id!==e.id)return;
+    box.className='note '+(n?'no':'yes');
+    box.textContent=n?`This password appears in ${n.toLocaleString()} known data breaches. Change it on ${e.service} and here.`:'Not found in any known breach.';
+  }catch{box.className='note no';box.textContent='Could not reach the breach database. Check your connection and try again.'}
+}
+
 /* ---------- views ---------- */
 function render(){
   $('#app').innerHTML=S.key?vault():gate();
@@ -150,7 +169,7 @@ function render(){
 function gate(){
   const names=Object.keys(load());
   return `<div class="gate"><h1>Vaultkeep</h1>
-  <p class="mute">Your passwords stay encrypted on this device. Nothing is ever sent anywhere.</p>
+  <p class="mute">Your passwords stay encrypted on this device. Nothing is sent anywhere unless you run the optional breach check.</p>
   ${names.length?`<h3>Open a profile</h3>
   <label for="pn">Profile</label><select id="pn">${names.map(n=>`<option>${esc(n)}</option>`).join('')}</select>
   <label for="pp">Master password</label><input id="pp" type="password" autocomplete="off" onkeydown="if(event.key==='Enter')doUnlock()">
@@ -253,6 +272,7 @@ function detailView(e){
   <p class="mute">Saved ${new Date(e.created).toLocaleDateString()}</p>
   ${kv('Username',e.username,e.username?cp('username'):'')}${kv('Account email',e.email,e.email?cp('email'):'')}
   <div class="kv"><span>Password</span><span class="mono" id="pw">••••••••••••</span><span class="row"><button onclick="const p=$('#pw');p.textContent=p.dataset.s?'••••••••••••':sel().password;p.dataset.s=p.dataset.s?'':1">Show</button><button onclick="copy(sel().password)">Copy</button></span></div>
+  <div class="row" style="margin-top:.6rem"><button onclick="checkPwned()" title="Sends only the first 5 characters of the password's SHA-1 hash to api.pwnedpasswords.com">Check pwned</button><span class="mute" style="font-size:.85rem">Optional online check. Your password never leaves this device.</span></div><div id="pwn" role="status"></div>
   ${open?`<div class="lock"><h3>Protected details <span class="mute" style="font-size:.8rem">(open until ${new Date(S.open[e.id]).toLocaleTimeString()})</span></h3>
   ${kv('Recovery',e.recEmail)}<div class="kv"><span>Security Q&amp;A</span><span class="mono" style="white-space:pre-wrap">${esc(e.qa||'—')}</span><span></span></div>${kv('Notes',e.notes)}
   <button onclick="delete S.open['${e.id}'];drawRight()">Hide now</button></div>`:challenge(e)}</div>`;
