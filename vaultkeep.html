@@ -55,6 +55,10 @@ button:hover{filter:brightness(.96)}
 .cf{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr) auto auto;gap:.4rem;align-items:center;margin-top:.5rem}
 .cf-m{display:inline-flex;gap:.3rem;align-items:center;margin:0;white-space:nowrap}.cf-m input{width:auto}
 @media(max-width:520px){.cf{grid-template-columns:1fr auto}}
+.totp{font-size:1.35rem;letter-spacing:.08em}
+.ring{transform:rotate(-90deg)}.ring circle{fill:none;stroke-width:4}
+.ring circle:first-child{stroke:var(--line)}.ring #totp_ring{stroke:var(--acc);stroke-dasharray:100;transition:stroke-dashoffset 1s linear}
+.ring[data-low="1"] #totp_ring{stroke:var(--warn)}
 #kit{display:none}
 @media print{
   @page{margin:18mm}
@@ -207,6 +211,51 @@ async function checkPwned(){
   }catch{box.className='note no';box.textContent='Could not reach the breach database. Check your connection and try again.'}
 }
 
+/* ---------- TOTP / 2FA (RFC 6238 over RFC 4226 HOTP, Web Crypto HMAC) ---------- */
+function b32decode(s){
+  const A='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';s=String(s).toUpperCase().replace(/[\s=-]/g,'');
+  let bitsN=0,val=0;const out=[];
+  for(const ch of s){const i=A.indexOf(ch);if(i<0)throw new Error('Invalid base32');val=(val<<5)|i;bitsN+=5;if(bitsN>=8){out.push((val>>>(bitsN-8))&255);bitsN-=8}}
+  return new Uint8Array(out);
+}
+// Accepts a raw base32 secret or an otpauth://totp/... URI.
+function parseTotp(input){
+  const s=String(input||'').trim();if(!s)return null;
+  let o={secret:s,digits:6,period:30,algo:'SHA-1'};
+  if(/^otpauth:\/\//i.test(s)){
+    const u=new URL(s);if(u.host.toLowerCase()!=='totp')throw new Error('Only TOTP is supported');
+    const p=u.searchParams,a=(p.get('algorithm')||'SHA1').toUpperCase().replace('SHA','SHA-');
+    o={secret:p.get('secret')||'',digits:+(p.get('digits')||6),period:+(p.get('period')||30),algo:a};
+  }
+  if(!['SHA-1','SHA-256','SHA-512'].includes(o.algo)||![6,7,8].includes(o.digits)||!(o.period>0))throw new Error('Unsupported TOTP parameters');
+  o.key=b32decode(o.secret);if(!o.key.length)throw new Error('Empty secret');
+  return o;
+}
+async function totpCode(input,now=Date.now()){
+  const o=parseTotp(input),ctr=Math.floor(now/1000/o.period),msg=new Uint8Array(8);
+  let c=ctr;for(let i=7;i>=0;i--){msg[i]=c&255;c=Math.floor(c/256)}
+  const k=await crypto.subtle.importKey('raw',o.key,{name:'HMAC',hash:o.algo},false,['sign']);
+  const h=new Uint8Array(await crypto.subtle.sign('HMAC',k,msg)),off=h[h.length-1]&15;
+  const bin=((h[off]&127)<<24)|(h[off+1]<<16)|(h[off+2]<<8)|h[off+3];
+  return{code:String(bin%10**o.digits).padStart(o.digits,'0'),left:o.period-Math.floor(now/1000)%o.period,period:o.period};
+}
+async function tickTotp(){
+  const e=S.key&&S.view==='detail'&&sel(),el=document.getElementById('totp');
+  if(!e||!e.totpSecret||!el||!el.isConnected)return;
+  try{const t=await totpCode(e.totpSecret);el.textContent=t.code.replace(/^(\d{3,4})(\d{3,4})$/,'$1 $2');
+    const r=document.getElementById('totp_ring');if(r){r.style.strokeDashoffset=String(100-100*t.left/t.period);r.parentNode.dataset.low=t.left<=5?1:''}
+    const l=document.getElementById('totp_left');if(l)l.textContent=t.left+'s';
+  }catch(err){el.textContent='Invalid secret'}
+}
+setInterval(tickTotp,1000);
+async function copyTotp(){try{copy((await totpCode(sel().totpSecret)).code)}catch{toast('This 2FA secret is invalid.')}}
+function totpHtml(e){
+  if(!e.totpSecret)return '';
+  return `<div class="kv"><span>2FA code</span><span class="mono totp" id="totp">······</span><span class="row">
+  <svg class="ring" viewBox="0 0 36 36" width="28" height="28" aria-hidden="true"><circle cx="18" cy="18" r="15.9" pathLength="100"/><circle id="totp_ring" cx="18" cy="18" r="15.9" pathLength="100"/></svg>
+  <span class="mute" id="totp_left" style="min-width:2.2em"></span><button onclick="copyTotp()">Copy</button></span></div>`;
+}
+
 /* ---------- views ---------- */
 function render(){
   $('#app').innerHTML=S.key?vault():gate();
@@ -267,6 +316,7 @@ function check(v){
 function drawRight(){
   const r=$('#right');if(!r)return;
   $('#list').innerHTML=listHtml();
+  setTimeout(tickTotp,0);
   r.innerHTML=S.view==='gen'?genView():S.view==='settings'?settingsView():S.view==='audit'?auditView():S.view==='form'?formView():(S.view==='detail'&&sel())?detailView(sel()):
    `<div class="card"><h2>Welcome back</h2><p class="mute">Check a service on the left before you sign up anywhere. If you already have an account, you'll see it. If not, create one with a generated password and keep its recovery details together.</p></div>`;
 }
@@ -296,7 +346,7 @@ function genView(){
   <div class="row"><button onclick="S._gp=null;drawRight()">Regenerate</button><button class="p" onclick="copy(S._gp)">Copy</button></div>
   <p class="mute" style="font-size:.85rem">New entries use the mode selected here.</p></div>`;
 }
-function newEntry(svc=''){S.sel=null;S._f={service:svc,username:'',email:'',password:genAny(),recEmail:'',qa:'',notes:'',fields:[]};S.view='form';render()}
+function newEntry(svc=''){S.sel=null;S._f={service:svc,username:'',email:'',password:genAny(),totpSecret:'',recEmail:'',qa:'',notes:'',fields:[]};S.view='form';render()}
 function editEntry(){const e=sel();S._f={...e,history:[...(e.history||[])],fields:(e.fields||[]).map(c=>({...c}))};S.view='form';render()}
 const HISTORY_MAX=20;
 function historyHtml(e){
@@ -311,6 +361,8 @@ function formView(){
   const inp=(k,l,t='text')=>`<label for="f_${k}">${l}</label><input id="f_${k}" type="${t}" value="${esc(f[k])}" autocomplete="off">`;
   return `<div class="card"><h2>${editing?'Edit':'New'} service</h2>${inp('service','Service')}${inp('username','Username')}${inp('email','Account email')}
   <label for="f_password">Password</label><div class="row"><input id="f_password" class="mono" style="flex:1" value="${esc(f.password)}"><button onclick="document.getElementById('f_password').value=genAny();">Generate</button></div>
+  <label for="f_totpSecret">2FA secret (optional, base32 key or otpauth:// link)</label><input id="f_totpSecret" class="mono" value="${esc(f.totpSecret)}" autocomplete="off" spellcheck="false" placeholder="JBSW Y3DP EHPK 3PXP">
+
   <h3 style="margin-top:1.2rem">Protected details</h3><p class="mute" style="margin:0">Shown only after the master-password check.</p>
   ${inp('recEmail','Recovery email or phone')}
   <label for="f_qa">Security questions (one per line: question | answer)</label><textarea id="f_qa">${esc(f.qa)}</textarea>
@@ -323,7 +375,7 @@ function formView(){
   <button style="margin-top:.6rem" onclick="readForm();S._f.fields.push({label:'',value:'',masked:1});drawRight()">Add field</button>
   <div class="row" style="margin-top:1rem"><button class="p" onclick="saveEntry()">Save</button><button onclick="S.view=S._f.id?'detail':'home';render()">Cancel</button></div></div>`;
 }
-const FORM_KEYS=['service','username','email','password','recEmail','qa','notes'];
+const FORM_KEYS=['service','username','email','password','totpSecret','recEmail','qa','notes'];
 // Pull the current form inputs back into S._f so re-rendering (e.g. adding a field) loses nothing.
 function readForm(){
   const f=S._f,v=id=>document.getElementById(id);
@@ -334,6 +386,8 @@ function readForm(){
 async function saveEntry(){
   const f=readForm();
   if(!f.service.trim()||!f.password)return toast('Service and password are required.');
+  f.totpSecret=(f.totpSecret||'').trim();
+  if(f.totpSecret)try{parseTotp(f.totpSecret)}catch(err){return toast('2FA secret is not valid: '+err.message)}
   const e={...f,service:f.service.trim(),username:f.username.trim(),email:f.email.trim(),recEmail:f.recEmail.trim(),
     fields:f.fields.map(c=>({...c,label:c.label.trim()})).filter(c=>c.label||c.value)};
   const prev=e.id&&S.entries.find(x=>x.id===e.id);
@@ -352,6 +406,7 @@ function detailView(e){
   <p class="mute">Saved ${new Date(e.created).toLocaleDateString()}</p>
   ${kv('Username',e.username,e.username?cp('username'):'')}${kv('Account email',e.email,e.email?cp('email'):'')}
   <div class="kv"><span>Password</span><span class="mono" id="pw">••••••••••••</span><span class="row"><button onclick="const p=$('#pw');p.textContent=p.dataset.s?'••••••••••••':sel().password;p.dataset.s=p.dataset.s?'':1">Show</button><button onclick="copy(sel().password)">Copy</button></span></div>
+  ${totpHtml(e)}
   <div class="row" style="margin-top:.6rem"><button onclick="checkPwned()" title="Sends only the first 5 characters of the password's SHA-1 hash to api.pwnedpasswords.com">Check pwned</button><span class="mute" style="font-size:.85rem">Optional online check. Your password never leaves this device.</span></div><div id="pwn" role="status"></div>
   ${(e.fields||[]).map((c,i)=>`<div class="kv"><span>${esc(c.label||'Field '+(i+1))}</span><span class="mono" id="cfv_${i}">${c.masked?'••••••••':esc(c.value||'—')}</span><span class="row">
   ${c.masked?`<button onclick="const p=$('#cfv_${i}');p.textContent=p.dataset.s?'••••••••':sel().fields[${i}].value;p.dataset.s=p.dataset.s?'':1">Show</button>`:''}${c.value?`<button onclick="copy(sel().fields[${i}].value)">Copy</button>`:''}</span></div>`).join('')}
