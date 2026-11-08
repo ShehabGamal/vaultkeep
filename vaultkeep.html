@@ -220,7 +220,7 @@ const cfg=()=>{try{return{lockMin:3,escLock:1,...JSON.parse(localStorage.getItem
 const setCfg=p=>{try{localStorage.setItem(SETTINGS_KEY,JSON.stringify({...cfg(),...p}))}catch{}};
 const lockLabel=()=>{const m=cfg().lockMin;return m?`auto-locks after ${m} idle minute${m>1?'s':''}`:'auto-lock off'};
 function lockApp(){
-  Object.assign(S,{key:null,salt:null,master:'',entries:[],name:null,sel:null,view:'home',open:{},chal:null,_f:null,_gp:null,filter:'all'});
+  Object.assign(S,{key:null,salt:null,master:'',entries:[],name:null,sel:null,view:'home',open:{},chal:null,_f:null,_gp:null,filter:'all',pending:null});
   $('#kit').innerHTML='';render();
 }
 ['click','keydown','mousemove','touchstart'].forEach(e=>addEventListener(e,()=>S.last=Date.now(),{passive:true}));
@@ -296,6 +296,83 @@ function totpHtml(e){
   <span class="mute" id="totp_left" style="min-width:2.2em"></span><button onclick="copyTotp()">Copy</button></span></div>`;
 }
 
+/* ---------- CSV importer (Bitwarden, KeePass/KeePassXC, 1Password, Chrome, Firefox, generic) ---------- */
+function parseCSV(text){
+  text=String(text).replace(/^\uFEFF/,'');const rows=[];let row=[],f='',q=false;
+  for(let i=0;i<text.length;i++){
+    const c=text[i];
+    if(q){if(c==='"'){if(text[i+1]==='"'){f+='"';i++}else q=false}else f+=c}
+    else if(c==='"'&&f==='')q=true;
+    else if(c===',' ){row.push(f);f=''}
+    else if(c==='\n'||c==='\r'){if(c==='\r'&&text[i+1]==='\n')i++;row.push(f);f='';if(row.length>1||row[0]!=='')rows.push(row);row=[]}
+    else f+=c;
+  }
+  if(f!==''||row.length){row.push(f);if(row.length>1||row[0]!=='')rows.push(row)}
+  return rows;
+}
+const CSV_COLS={
+  service:['name','title','account'],url:['url','login_uri','web site','website','login url'],
+  username:['username','login_username','login name','user name','login'],password:['password','login_password'],
+  totp:['login_totp','totp','otpauth','one-time password'],notes:['notes','note','comments','extra'],
+  tags:['folder','group','tags'],fav:['favorite','favourite'],type:['type'],
+  fields:['fields'],created:['timecreated','created','creation time'],changed:['timepasswordchanged','last modified','password last modified']
+};
+function detectFormat(h){
+  const has=k=>h.includes(k);
+  return has('login_password')?'Bitwarden':has('httprealm')||has('formactionorigin')?'Firefox':has('group')&&has('title')||has('login name')?'KeePass':
+    has('otpauth')||has('archived')?'1Password':h.join()==='name,url,username,password'||h.join()==='name,url,username,password,note'?'Chrome':'Generic CSV';
+}
+const toTime=v=>{if(!v)return 0;const n=+v;if(n>1e11)return n;const d=Date.parse(v);return isNaN(d)?0:d};
+function csvToEntries(text){
+  const rows=parseCSV(text);if(rows.length<2)throw new Error('The file has no data rows.');
+  const h=rows[0].map(x=>x.trim().toLowerCase()),fmt=detectFormat(h);
+  const idx={};for(const [k,al] of Object.entries(CSV_COLS))idx[k]=h.findIndex(x=>al.includes(x));
+  if(idx.password<0&&idx.notes<0)throw new Error('No password column found. Is this a password export?');
+  const out=[];
+  for(const r of rows.slice(1)){
+    const g=k=>idx[k]>=0?(r[idx[k]]||'').trim():'',pw=idx.password>=0?(r[idx.password]||''):'';
+    const url=g('url'),bwType=g('type').toLowerCase();
+    let host='';try{host=url?new URL(/^[a-z][\w+.-]*:\/\//i.test(url)?url:'https://'+url).hostname.replace(/^www\./,''):''}catch{}
+    if(/^(chrome|about|moz-extension):/i.test(url))continue;
+    const type=bwType==='note'||bwType==='securenote'?'note':bwType==='card'?'card':bwType==='identity'?'note':'login';
+    const service=g('service')||host||url;if(!service&&!pw)continue;
+    const user=g('username'),isMail=/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(user);
+    const fields=[];if(url)fields.push({label:'URL',value:url,masked:0});
+    if(g('fields'))g('fields').split(/\r?\n/).forEach(l=>{const m=l.match(/^([^:]+):\s?(.*)$/);if(m)fields.push({label:m[1].trim(),value:m[2],masked:1})});
+    let totp=g('totp');if(totp){try{parseTotp(totp)}catch{fields.push({label:'TOTP',value:totp,masked:1});totp=''}}
+    const created=toTime(g('created'))||Date.now();
+    out.push({type,service:service||'(untitled)',username:isMail?'':user,email:isMail?user:'',password:pw,totpSecret:totp,
+      recEmail:'',qa:'',notes:g('notes'),fields,tags:parseTags(g('tags').replace(/[\\/]/g,',')),fav:/^(1|true|yes)$/i.test(g('fav'))?1:0,
+      created,pwChanged:toTime(g('changed'))||created,history:[]});
+  }
+  return{fmt,entries:out};
+}
+async function importEntries(list){
+  const key=e=>[e.service.toLowerCase(),e.username,e.email,e.password].join('\u0000'),seen=new Set(S.entries.map(key));
+  let added=0,dup=0;
+  for(const e of list){if(seen.has(key(e))){dup++;continue}seen.add(key(e));S.entries.push({...e,id:uid()});added++}
+  if(added)await seal();
+  return{added,dup};
+}
+async function importCSV(file,input){
+  if(!file)return;const box=$('#imp');
+  try{
+    const {fmt,entries}=csvToEntries(await file.text());
+    if(!S.key){S.pending={fmt,entries};render();return}
+    const {added,dup}=await importEntries(entries);
+    render();toast(`Imported ${added} entr${added===1?'y':'ies'} from ${fmt}${dup?`, skipped ${dup} duplicate${dup>1?'s':''}`:''}. Delete the CSV file now: it is unencrypted.`);
+  }catch(err){if(box){box.className='note no';box.textContent='Import failed: '+(err.message||err)}}
+  finally{if(input)input.value=''}
+}
+async function flushPending(){
+  if(!S.pending||!S.key)return;const p=S.pending;S.pending=null;
+  const {added,dup}=await importEntries(p.entries);render();
+  toast(`Imported ${added} entr${added===1?'y':'ies'} from ${p.fmt}${dup?`, skipped ${dup} duplicates`:''}. Delete the CSV file now: it is unencrypted.`);
+}
+const importHtml=()=>`<label for="csv">Import passwords from CSV (Bitwarden, KeePass, 1Password, Chrome, Firefox)</label>
+  <input id="csv" type="file" accept=".csv,text/csv" onchange="importCSV(this.files[0],this)"><div id="imp" role="status"></div>
+  <p class="mute" style="font-size:.8rem">The file is parsed on this device only. Duplicates are skipped. Delete the unencrypted CSV afterwards.</p>`;
+
 /* ---------- views ---------- */
 function render(){
   $('#app').innerHTML=S.key?vault():gate();
@@ -316,11 +393,13 @@ function gate(){
   <label for="n2">Repeat master password</label><input id="n2" type="password" autocomplete="off">
   <p class="mute" style="font-size:.85rem">There is no recovery. If you forget this password, the vault cannot be opened. That is what keeps it safe.</p>
   <p class="err" id="ce"></p><button class="p" onclick="doCreate()">Create profile</button>
-  <p class="mute" style="margin-top:1.2rem"><label style="display:inline">Restore a backup: <input type="file" accept=".json" onchange="importBackup(this.files[0])" style="margin-top:.3rem"></label></p></div>`;
+  <p class="mute" style="margin-top:1.2rem"><label style="display:inline">Restore a backup: <input type="file" accept=".json" onchange="importBackup(this.files[0])" style="margin-top:.3rem"></label></p>
+  ${importHtml()}${S.pending?`<div class="note yes">${S.pending.entries.length} entries from ${esc(S.pending.fmt)} are waiting. Unlock or create a profile to import them. <button onclick="S.pending=null;render()">Discard</button></div>`:''}</div>`;
 }
 async function doUnlock(){
   const e=$('#ge');e.textContent='Checking…';
-  try{await unlockProfile($('#pn').value,$('#pp').value);render()}catch{e.textContent='Wrong master password for this profile.'}
+  try{await unlockProfile($('#pn').value,$('#pp').value)}catch{return e.textContent='Wrong master password for this profile.'}
+  render();await flushPending();
 }
 async function doCreate(){
   const n=$('#nn').value.trim(),a=$('#n1').value,b=$('#n2').value,e=$('#ce');
@@ -331,7 +410,7 @@ async function doCreate(){
   e.textContent='Creating…';
   const salt=crypto.getRandomValues(new Uint8Array(16));
   Object.assign(S,{name:n,salt,key:await derive(a,salt),master:a,entries:[],sel:null,view:'home',open:{}});
-  await seal();render();
+  await seal();render();await flushPending();
 }
 function vault(){
   return `<div class="top"><div><h2 style="margin:0">Vaultkeep</h2><span class="mute">Profile: ${esc(S.name)} · ${lockLabel()} · <kbd>Ctrl/⌘+L</kbd> locks</span></div>
@@ -391,6 +470,7 @@ function settingsView(){
   ${c.lockMin?'':'<p class="err" style="font-size:.85rem">With auto-lock off, anyone with access to this unlocked screen can read your vault.</p>'}
   <label style="display:flex;gap:.5rem;align-items:center"><input type="checkbox" style="width:auto" ${c.escLock?'checked':''} onchange="setCfg({escLock:this.checked?1:0})">Lock immediately with the Escape key</label>
   <p class="mute" style="font-size:.85rem">Ctrl+L (⌘+L on Mac) always locks the vault. Locking wipes the decrypted entries and key from memory.</p>
+  <h3 style="margin-top:1.2rem">Import</h3>${importHtml()}
   <h3 style="margin-top:1.2rem">Storage</h3>
   <p class="mute" style="font-size:.85rem">${S.storage==='indexeddb'?'Encrypted vaults are stored in IndexedDB on this device.':'IndexedDB is unavailable here, so vaults are stored in localStorage (about 5 MB limit). Export backups regularly.'}</p></div>`;
 }
