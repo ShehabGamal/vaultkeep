@@ -7,7 +7,7 @@
 <!--
   Vaultkeep: open-source, local-first password manager (single file, no server, no dependencies).
   Crypto: PBKDF2-SHA256 (600k iterations) -> AES-256-GCM via the browser's Web Crypto API.
-  Each profile has its own master password and its own encrypted vault in localStorage.
+  Each profile has its own master password and its own encrypted vault in IndexedDB (migrated automatically from older localStorage versions).
   License: MIT. Audit it, fork it, improve it.
 -->
 <style>
@@ -90,8 +90,45 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 const b64=b=>{let s='';new Uint8Array(b).forEach(x=>s+=String.fromCharCode(x));return btoa(s)};
 const ub64=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
 const uid=()=>Array.from(crypto.getRandomValues(new Uint8Array(8)),x=>x.toString(16).padStart(2,'0')).join('');
-const load=()=>{try{return JSON.parse(localStorage.getItem('vaultkeep.v1'))||{}}catch{return{}}};
-const store=o=>{try{localStorage.setItem('vaultkeep.v1',JSON.stringify(o))}catch{alert('Browser storage is unavailable. Export a backup and use a normal browser window.')}};
+/* ---------- storage: IndexedDB with in-memory mirror, localStorage fallback ----------
+   All encrypted profile records live in IndexedDB (db "vaultkeep", store "profiles", key = profile name).
+   load() is synchronous and reads the mirror; store() updates the mirror and persists atomically.
+   Legacy "vaultkeep.v1" localStorage data is migrated once and removed only after a verified write. */
+const LEGACY_KEY='vaultkeep.v1',IDB_NAME='vaultkeep',IDB_STORE='profiles';
+let DB={},idb=null;
+const idbReq=r=>new Promise((ok,no)=>{r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)});
+const idbTx=(mode,fn)=>new Promise((ok,no)=>{const t=idb.transaction(IDB_STORE,mode),s=t.objectStore(IDB_STORE);const out=fn(s);
+  t.oncomplete=()=>ok(out);t.onerror=t.onabort=()=>no(t.error||new Error('IndexedDB transaction failed'))});
+async function idbOpen(){
+  if(typeof indexedDB==='undefined')throw new Error('IndexedDB unavailable');
+  const r=indexedDB.open(IDB_NAME,1);r.onupgradeneeded=()=>r.result.createObjectStore(IDB_STORE);
+  const db=await idbReq(r);db.onversionchange=()=>db.close();return db;
+}
+async function idbReadAll(){
+  const o={};await idbTx('readonly',s=>{const c=s.openCursor();c.onsuccess=()=>{const k=c.result;if(k){o[k.key]=k.value;k.continue()}}});return o;
+}
+const legacyLoad=()=>{try{return JSON.parse(localStorage.getItem(LEGACY_KEY))||{}}catch{return{}}};
+async function initStorage(){
+  try{
+    idb=await idbOpen();DB=await idbReadAll();
+    const legacy=legacyLoad(),missing=Object.keys(legacy).filter(n=>!(n in DB));
+    if(missing.length){
+      await idbTx('readwrite',s=>missing.forEach(n=>s.put(legacy[n],n)));
+      const check=await idbReadAll();
+      if(missing.every(n=>JSON.stringify(check[n])===JSON.stringify(legacy[n]))){DB=check;localStorage.removeItem(LEGACY_KEY)}
+      else throw new Error('Migration verification failed');
+    }else if(localStorage.getItem(LEGACY_KEY)!==null&&Object.keys(legacy).every(n=>JSON.stringify(DB[n])===JSON.stringify(legacy[n])))localStorage.removeItem(LEGACY_KEY);
+    S.storage='indexeddb';
+  }catch(err){idb=null;DB=legacyLoad();S.storage='localstorage';console.warn('Vaultkeep: falling back to localStorage',err)}
+}
+const load=()=>structuredClone(DB);
+async function store(o){
+  const prev=DB;DB=structuredClone(o);
+  try{
+    if(idb)await idbTx('readwrite',s=>{s.clear();for(const [n,v] of Object.entries(DB))s.put(v,n)});
+    else localStorage.setItem(LEGACY_KEY,JSON.stringify(DB));
+  }catch(err){DB=prev;alert('Could not save to browser storage ('+(err?.name||'error')+'). Export a backup and use a normal browser window.');throw err}
+}
 
 let S={name:null,key:null,salt:null,master:'',entries:[],sel:null,view:'home',open:{},fails:0,lockUntil:0,chal:null,last:Date.now(),
   g:{mode:'chars',len:20,up:1,lo:1,di:1,sy:1,am:1,words:5,sep:'-',cap:0,num:0}};
@@ -104,7 +141,7 @@ async function derive(pw,salt){
 async function seal(){
   const iv=crypto.getRandomValues(new Uint8Array(12));
   const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv},S.key,enc.encode(JSON.stringify(S.entries)));
-  const all=load();all[S.name]={salt:b64(S.salt),iv:b64(iv),ct:b64(ct),created:all[S.name]?.created||Date.now()};store(all);
+  const all=load();all[S.name]={salt:b64(S.salt),iv:b64(iv),ct:b64(ct),created:all[S.name]?.created||Date.now()};await store(all);
 }
 async function unlockProfile(name,pw){
   const rec=load()[name];const salt=ub64(rec.salt);const key=await derive(pw,salt);
@@ -353,7 +390,9 @@ function settingsView(){
   ${LOCK_OPTS.map(([v,l])=>`<option value="${v}" ${c.lockMin===v?'selected':''}>${l}</option>`).join('')}</select>
   ${c.lockMin?'':'<p class="err" style="font-size:.85rem">With auto-lock off, anyone with access to this unlocked screen can read your vault.</p>'}
   <label style="display:flex;gap:.5rem;align-items:center"><input type="checkbox" style="width:auto" ${c.escLock?'checked':''} onchange="setCfg({escLock:this.checked?1:0})">Lock immediately with the Escape key</label>
-  <p class="mute" style="font-size:.85rem">Ctrl+L (⌘+L on Mac) always locks the vault. Locking wipes the decrypted entries and key from memory.</p></div>`;
+  <p class="mute" style="font-size:.85rem">Ctrl+L (⌘+L on Mac) always locks the vault. Locking wipes the decrypted entries and key from memory.</p>
+  <h3 style="margin-top:1.2rem">Storage</h3>
+  <p class="mute" style="font-size:.85rem">${S.storage==='indexeddb'?'Encrypted vaults are stored in IndexedDB on this device.':'IndexedDB is unavailable here, so vaults are stored in localStorage (about 5 MB limit). Export backups regularly.'}</p></div>`;
 }
 function genView(){
   const g=S.g,b=bits(),pw=S._gp||(S._gp=genAny()),W=g.mode==='words';
@@ -486,10 +525,13 @@ function kitHtml(){
 }
 function printKit(){const k=$('#kit');k.innerHTML=kitHtml();window.print();setTimeout(()=>k.innerHTML='',1000)}
 async function importBackup(f){
-  if(!f)return;try{const j=JSON.parse(await f.text());if(!j.vaultkeep||!j.data)throw 0;
-  const all=load();let n=j.profile;while(all[n])n+=' (restored)';all[n]=j.data;store(all);render();alert('Restored as profile “'+n+'”.')}catch{alert('That file is not a Vaultkeep backup.')}
+  if(!f)return;let j;try{j=JSON.parse(await f.text());if(!j.vaultkeep||!j.data||!j.data.ct)throw 0}catch{return alert('That file is not a Vaultkeep backup.')}
+  const all=load();let n=j.profile||'Restored';while(all[n])n+=' (restored)';all[n]=j.data;
+  try{await store(all)}catch{return}
+  render();alert('Restored as profile “'+n+'”.');
 }
-render();
+$('#app').innerHTML='<p class="mute" style="text-align:center;margin-top:20vh">Opening vault storage…</p>';
+initStorage().then(()=>{navigator.storage?.persist?.().catch(()=>{});render()});
 </script>
 </body>
 </html>
