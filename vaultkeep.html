@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vaultkeep</title>
+<!--
+  Vaultkeep: open-source, local-first password manager (single file, no server, no dependencies).
+  Crypto: PBKDF2-SHA256 (600k iterations) -> AES-256-GCM via the browser's Web Crypto API.
+  Each profile has its own master password and its own encrypted vault in localStorage.
+  License: MIT. Audit it, fork it, improve it.
+-->
+<style>
+:root{--bg:#edf1ef;--panel:#fbfcfb;--ink:#12262a;--mute:#5d7074;--line:#cfd9d6;--acc:#0b6a68;--acc-ink:#fff;--warn:#a8432b;--ok:#2f7a4a;--sel:#dcebe8;
+--serif:Georgia,"Iowan Old Style",serif;--sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;--mono:ui-monospace,Menlo,Consolas,monospace;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--bg:#0e1a1c;--panel:#152427;--ink:#e3eeec;--mute:#8da4a6;--line:#27393c;--acc:#4fc3bd;--acc-ink:#062022;--warn:#ef8f75;--ok:#6fd09a;--sel:#1d3336;color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans)}
+h1,h2,h3{font-family:var(--serif);font-weight:600;margin:0 0 .4em}
+h1{font-size:2rem}h2{font-size:1.35rem}h3{font-size:1.05rem}
+button,input,select,textarea{font:inherit;color:inherit}
+input,textarea,select{width:100%;padding:.55rem .7rem;border:1px solid var(--line);border-radius:6px;background:var(--panel)}
+textarea{min-height:4.5rem;resize:vertical}
+label{display:block;margin:.7rem 0 .25rem;color:var(--mute);font-size:.85rem}
+button{cursor:pointer;border:1px solid var(--line);background:var(--panel);padding:.5rem .9rem;border-radius:6px}
+button.p{background:var(--acc);color:var(--acc-ink);border-color:var(--acc);font-weight:600}
+button.d{color:var(--warn)}
+button:hover{filter:brightness(.96)}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.wrap{max-width:1040px;margin:0 auto;padding:1rem}
+.gate{max-width:420px;margin:8vh auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:1.6rem}
+.top{display:flex;gap:.6rem;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:.6rem 0 1rem}
+.grid{display:grid;grid-template-columns:320px 1fr;gap:1rem}
+@media(max-width:760px){.grid{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:1rem}
+.list{margin-top:.8rem;display:flex;flex-direction:column;gap:2px;max-height:55vh;overflow:auto}
+.item{display:block;text-align:left;width:100%;border:0;background:none;padding:.55rem .6rem;border-radius:6px}
+.item.on{background:var(--sel)}
+.item small{display:block;color:var(--mute)}
+.row{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
+.kv{display:grid;grid-template-columns:130px 1fr auto;gap:.5rem;padding:.55rem 0;border-bottom:1px solid var(--line);align-items:center}
+.kv span:first-child{color:var(--mute)}
+.mono{font-family:var(--mono);word-break:break-all}
+.note{padding:.7rem .8rem;border-radius:6px;border:1px solid var(--line);margin-top:.8rem}
+.note.no{border-color:var(--warn);color:var(--warn)}
+.note.yes{border-color:var(--ok);color:var(--ok)}
+.bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin-top:.4rem}
+.bar i{display:block;height:100%;background:var(--acc)}
+.lock{border:1px dashed var(--line);border-radius:8px;padding:.9rem;margin-top:1rem}
+.pos{width:3.2rem;text-align:center;font-family:var(--mono)}
+.mute{color:var(--mute)}.err{color:var(--warn)}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+<script>
+const enc=new TextEncoder(),dec=new TextDecoder();
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const b64=b=>{let s='';new Uint8Array(b).forEach(x=>s+=String.fromCharCode(x));return btoa(s)};
+const ub64=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
+const uid=()=>Array.from(crypto.getRandomValues(new Uint8Array(8)),x=>x.toString(16).padStart(2,'0')).join('');
+const load=()=>{try{return JSON.parse(localStorage.getItem('vaultkeep.v1'))||{}}catch{return{}}};
+const store=o=>{try{localStorage.setItem('vaultkeep.v1',JSON.stringify(o))}catch{alert('Browser storage is unavailable. Export a backup and use a normal browser window.')}};
+
+let S={name:null,key:null,salt:null,master:'',entries:[],sel:null,view:'home',open:{},fails:0,lockUntil:0,chal:null,last:Date.now(),
+  g:{len:20,up:1,lo:1,di:1,sy:1,am:1}};
+
+/* ---------- crypto ---------- */
+async function derive(pw,salt){
+  const k=await crypto.subtle.importKey('raw',enc.encode(pw),'PBKDF2',false,['deriveKey']);
+  return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:600000,hash:'SHA-256'},k,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);
+}
+async function seal(){
+  const iv=crypto.getRandomValues(new Uint8Array(12));
+  const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv},S.key,enc.encode(JSON.stringify(S.entries)));
+  const all=load();all[S.name]={salt:b64(S.salt),iv:b64(iv),ct:b64(ct)};store(all);
+}
+async function unlockProfile(name,pw){
+  const rec=load()[name];const salt=ub64(rec.salt);const key=await derive(pw,salt);
+  const pt=await crypto.subtle.decrypt({name:'AES-GCM',iv:ub64(rec.iv)},key,ub64(rec.ct));
+  Object.assign(S,{name,key,salt,master:pw,entries:JSON.parse(dec.decode(pt)),sel:null,view:'home',open:{},fails:0,lockUntil:0,last:Date.now()});
+}
+
+/* ---------- generator ---------- */
+function rnd(n){const m=Math.floor(2**32/n)*n;let x;do{x=crypto.getRandomValues(new Uint32Array(1))[0]}while(x>=m);return x%n}
+function genSets(o){
+  const f=s=>o.am?s.replace(/[lIO01|]/g,''):s;
+  const a=[];if(o.lo)a.push(f('abcdefghijklmnopqrstuvwxyz'));if(o.up)a.push(f('ABCDEFGHIJKLMNOPQRSTUVWXYZ'));
+  if(o.di)a.push(f('0123456789'));if(o.sy)a.push('!@#$%^&*()-_=+[]{};:,.?');return a;
+}
+function gen(o=S.g){
+  const sets=genSets(o);if(!sets.length)return'';const pool=sets.join('');const out=sets.map(s=>s[rnd(s.length)]);
+  while(out.length<o.len)out.push(pool[rnd(pool.length)]);
+  for(let i=out.length-1;i>0;i--){const j=rnd(i+1);[out[i],out[j]]=[out[j],out[i]]}
+  return out.slice(0,o.len).join('');
+}
+const bits=(o=S.g)=>Math.round(o.len*Math.log2(Math.max(2,genSets(o).join('').length)));
+const strength=b=>b<60?'Weak':b<80?'Fair':b<110?'Strong':'Excellent';
+
+/* ---------- helpers ---------- */
+const norm=s=>String(s).toLowerCase().trim().replace(/^https?:\/\//,'').replace(/^www\./,'').replace(/\/.*$/,'').replace(/\.(com|org|net|io|ai|app|co)$/,'');
+const sel=()=>S.entries.find(e=>e.id===S.sel);
+async function copy(t){
+  try{await navigator.clipboard.writeText(t);toast('Copied. Clipboard clears in 20 seconds.');
+  setTimeout(()=>navigator.clipboard.writeText('').catch(()=>{}),20000)}catch{toast('Copy blocked by the browser. Use Show instead.')}
+}
+function toast(m){const t=$('#toast');if(t){t.textContent=m;setTimeout(()=>{if(t.textContent===m)t.textContent=''},4000)}}
+function lockApp(){Object.assign(S,{key:null,master:'',entries:[],name:null,sel:null,open:{}});render()}
+['click','keydown','mousemove'].forEach(e=>addEventListener(e,()=>S.last=Date.now()));
+setInterval(()=>{if(S.key&&Date.now()-S.last>3*60000)lockApp()},5000);
+
+/* ---------- views ---------- */
+function render(){
+  $('#app').innerHTML=S.key?vault():gate();
+  if(S.key)drawRight();
+}
+function gate(){
+  const names=Object.keys(load());
+  return `<div class="gate"><h1>Vaultkeep</h1>
+  <p class="mute">Your passwords stay encrypted on this device. Nothing is ever sent anywhere.</p>
+  ${names.length?`<h3>Open a profile</h3>
+  <label for="pn">Profile</label><select id="pn">${names.map(n=>`<option>${esc(n)}</option>`).join('')}</select>
+  <label for="pp">Master password</label><input id="pp" type="password" autocomplete="off" onkeydown="if(event.key==='Enter')doUnlock()">
+  <p class="err" id="ge"></p><button class="p" onclick="doUnlock()">Unlock</button>
+  <hr style="border:0;border-top:1px solid var(--line);margin:1.4rem 0">`:''}
+  <h3>Create a new profile</h3>
+  <label for="nn">Profile name</label><input id="nn" autocomplete="off">
+  <label for="n1">Master password (12+ characters)</label><input id="n1" type="password" autocomplete="off">
+  <label for="n2">Repeat master password</label><input id="n2" type="password" autocomplete="off">
+  <p class="mute" style="font-size:.85rem">There is no recovery. If you forget this password, the vault cannot be opened. That is what keeps it safe.</p>
+  <p class="err" id="ce"></p><button class="p" onclick="doCreate()">Create profile</button>
+  <p class="mute" style="margin-top:1.2rem"><label style="display:inline">Restore a backup: <input type="file" accept=".json" onchange="importBackup(this.files[0])" style="margin-top:.3rem"></label></p></div>`;
+}
+async function doUnlock(){
+  const e=$('#ge');e.textContent='Checking…';
+  try{await unlockProfile($('#pn').value,$('#pp').value);render()}catch{e.textContent='Wrong master password for this profile.'}
+}
+async function doCreate(){
+  const n=$('#nn').value.trim(),a=$('#n1').value,b=$('#n2').value,e=$('#ce');
+  if(!n)return e.textContent='Enter a profile name.';
+  if(load()[n])return e.textContent='That profile name already exists.';
+  if(a.length<12)return e.textContent='Use at least 12 characters.';
+  if(a!==b)return e.textContent='The two passwords do not match.';
+  e.textContent='Creating…';
+  const salt=crypto.getRandomValues(new Uint8Array(16));
+  Object.assign(S,{name:n,salt,key:await derive(a,salt),master:a,entries:[],sel:null,view:'home',open:{}});
+  await seal();render();
+}
+function vault(){
+  return `<div class="top"><div><h2 style="margin:0">Vaultkeep</h2><span class="mute">Profile: ${esc(S.name)} · auto-locks after 3 idle minutes</span></div>
+  <div class="row"><button onclick="S.view='gen';drawRight()">Generator</button><button onclick="exportBackup()">Export backup</button><button class="p" onclick="lockApp()">Lock</button></div></div>
+  <div class="grid"><div class="card"><h3>Do I have an account?</h3>
+  <input id="q" placeholder="Type a service, e.g. claude.ai" oninput="check(this.value)" autocomplete="off">
+  <div id="chk"></div><div class="row" style="margin-top:.8rem;justify-content:space-between"><h3 style="margin:0">Saved services</h3><button onclick="newEntry()">Add</button></div>
+  <div class="list" id="list">${listHtml()}</div></div><div id="right"></div></div><p class="mute" id="toast" role="status"></p>`;
+}
+function listHtml(){
+  if(!S.entries.length)return '<p class="mute">Nothing saved yet. Use the box above to check a service, then create its password here.</p>';
+  return [...S.entries].sort((a,b)=>a.service.localeCompare(b.service)).map(e=>
+  `<button class="item ${e.id===S.sel?'on':''}" onclick="S.sel='${e.id}';S.view='detail';render()">${esc(e.service)}<small>${esc(e.username||e.email||'')}</small></button>`).join('');
+}
+function check(v){
+  const q=norm(v),box=$('#chk');if(!q){box.innerHTML='';return}
+  const hits=S.entries.filter(e=>{const s=norm(e.service);return s.includes(q)||q.includes(s)});
+  box.innerHTML=hits.length?
+   `<div class="note yes">Yes. You already have ${hits.length>1?hits.length+' accounts':'an account'} here:${hits.map(h=>`<div><button class="item" onclick="S.sel='${h.id}';S.view='detail';render()">${esc(h.service)} · saved ${new Date(h.created).toLocaleDateString()}</button></div>`).join('')}</div>`:
+   `<div class="note no">No account saved for “${esc(v.trim())}”. If you sign up, create it here so the password is generated and stored together.<div style="margin-top:.6rem"><button class="p" onclick="newEntry($('#q').value.trim())">Create with a generated password</button></div></div>`;
+}
+function drawRight(){
+  const r=$('#right');if(!r)return;
+  $('#list').innerHTML=listHtml();
+  r.innerHTML=S.view==='gen'?genView():S.view==='form'?formView():(S.view==='detail'&&sel())?detailView(sel()):
+   `<div class="card"><h2>Welcome back</h2><p class="mute">Check a service on the left before you sign up anywhere. If you already have an account, you'll see it. If not, create one with a generated password and keep its recovery details together.</p></div>`;
+}
+function genView(){
+  const g=S.g,b=bits(),pw=S._gp||(S._gp=gen());
+  const cb=(k,t)=>`<label style="display:inline-flex;gap:.3rem;margin-right:1rem"><input type="checkbox" style="width:auto" ${g[k]?'checked':''} onchange="S.g.${k}=this.checked?1:0;S._gp=null;drawRight()">${t}</label>`;
+  return `<div class="card"><h2>Password generator</h2><div class="mono note" style="font-size:1.1rem">${esc(pw)}</div>
+  <div class="bar"><i style="width:${Math.min(100,b/1.4)}%"></i></div><p class="mute">${strength(b)} · about ${b} bits of entropy</p>
+  <label for="gl">Length: ${g.len}</label><input id="gl" type="range" min="12" max="64" value="${g.len}" oninput="S.g.len=+this.value;S._gp=null;drawRight()">
+  <p>${cb('lo','a–z')}${cb('up','A–Z')}${cb('di','0–9')}${cb('sy','Symbols')}${cb('am','Skip look-alikes (l I 1 O 0)')}</p>
+  <div class="row"><button onclick="S._gp=null;drawRight()">Regenerate</button><button class="p" onclick="copy(S._gp)">Copy</button></div></div>`;
+}
+function newEntry(svc=''){S.sel=null;S._f={service:svc,username:'',email:'',password:gen(),recEmail:'',qa:'',notes:''};S.view='form';render()}
+function editEntry(){S._f={...sel()};S.view='form';render()}
+function formView(){
+  const f=S._f,editing=!!f.id;
+  const inp=(k,l,t='text')=>`<label for="f_${k}">${l}</label><input id="f_${k}" type="${t}" value="${esc(f[k])}" autocomplete="off">`;
+  return `<div class="card"><h2>${editing?'Edit':'New'} service</h2>${inp('service','Service')}${inp('username','Username')}${inp('email','Account email')}
+  <label for="f_password">Password</label><div class="row"><input id="f_password" class="mono" style="flex:1" value="${esc(f.password)}"><button onclick="document.getElementById('f_password').value=gen();">Generate</button></div>
+  <h3 style="margin-top:1.2rem">Protected details</h3><p class="mute" style="margin:0">Shown only after the master-password check.</p>
+  ${inp('recEmail','Recovery email or phone')}
+  <label for="f_qa">Security questions (one per line: question | answer)</label><textarea id="f_qa">${esc(f.qa)}</textarea>
+  <label for="f_notes">Notes</label><textarea id="f_notes">${esc(f.notes)}</textarea>
+  <div class="row" style="margin-top:1rem"><button class="p" onclick="saveEntry()">Save</button><button onclick="S.view=S._f.id?'detail':'home';render()">Cancel</button></div></div>`;
+}
+async function saveEntry(){
+  const g=k=>document.getElementById('f_'+k).value;const f=S._f;
+  if(!g('service').trim()||!g('password'))return toast('Service and password are required.');
+  const e={...f,service:g('service').trim(),username:g('username').trim(),email:g('email').trim(),password:g('password'),recEmail:g('recEmail').trim(),qa:g('qa'),notes:g('notes')};
+  if(e.id)S.entries=S.entries.map(x=>x.id===e.id?e:x);else{e.id=uid();e.created=Date.now();S.entries.push(e)}
+  await seal();S.sel=e.id;S.view='detail';render();toast('Saved and encrypted.');
+}
+async function delEntry(){if(!confirm('Delete this service permanently?'))return;S.entries=S.entries.filter(e=>e.id!==S.sel);S.sel=null;S.view='home';await seal();render()}
+function detailView(e){
+  const open=(S.open[e.id]||0)>Date.now();
+  const kv=(l,v,c)=>`<div class="kv"><span>${l}</span><span class="mono">${esc(v||'—')}</span><span>${c||''}</span></div>`;
+  const cp=(id)=>`<button onclick="copy(sel().${id})">Copy</button>`;
+  return `<div class="card"><div class="row" style="justify-content:space-between"><h2 style="margin:0">${esc(e.service)}</h2><div class="row"><button onclick="editEntry()">Edit</button><button class="d" onclick="delEntry()">Delete</button></div></div>
+  <p class="mute">Saved ${new Date(e.created).toLocaleDateString()}</p>
+  ${kv('Username',e.username,e.username?cp('username'):'')}${kv('Account email',e.email,e.email?cp('email'):'')}
+  <div class="kv"><span>Password</span><span class="mono" id="pw">••••••••••••</span><span class="row"><button onclick="const p=$('#pw');p.textContent=p.dataset.s?'••••••••••••':sel().password;p.dataset.s=p.dataset.s?'':1">Show</button><button onclick="copy(sel().password)">Copy</button></span></div>
+  ${open?`<div class="lock"><h3>Protected details <span class="mute" style="font-size:.8rem">(open until ${new Date(S.open[e.id]).toLocaleTimeString()})</span></h3>
+  ${kv('Recovery',e.recEmail)}<div class="kv"><span>Security Q&amp;A</span><span class="mono" style="white-space:pre-wrap">${esc(e.qa||'—')}</span><span></span></div>${kv('Notes',e.notes)}
+  <button onclick="delete S.open['${e.id}'];drawRight()">Hide now</button></div>`:challenge(e)}</div>`;
+}
+function challenge(e){
+  const wait=Math.ceil((S.lockUntil-Date.now())/1000);
+  if(wait>0)return `<div class="lock"><h3>Protected details</h3><p class="err">Too many wrong answers. Try again in ${wait}s.</p><button onclick="drawRight()">Refresh</button></div>`;
+  if(!S.chal){const p=new Set;while(p.size<3)p.add(rnd(S.master.length));S.chal=[...p].sort((a,b)=>a-b)}
+  return `<div class="lock"><h3>Protected details are locked</h3><p class="mute">Recovery info and security answers need two checks: your full master password, and three of its characters at random positions.</p>
+  <label for="c_m">Master password</label><input id="c_m" type="password" autocomplete="off">
+  <div class="row" style="margin-top:.7rem">${S.chal.map((p,i)=>`<label style="margin:0">#${p+1} <input class="pos" id="c_${i}" maxlength="1" autocomplete="off"></label>`).join('')}</div>
+  <p class="err" id="ce2"></p><button class="p" onclick="verify('${e.id}')">Unlock for 30 seconds</button></div>`;
+}
+function verify(id){
+  const ok=$('#c_m').value===S.master&&S.chal.every((p,i)=>document.getElementById('c_'+i).value===S.master[p]);
+  S.chal=null;
+  if(ok){S.fails=0;S.open[id]=Date.now()+30000;drawRight();setTimeout(drawRight,30500);return}
+  S.fails++;if(S.fails>=3)S.lockUntil=Date.now()+30000*2**(S.fails-3);
+  drawRight();const e=$('#ce2');if(e)e.textContent='Those answers do not match.';
+}
+function exportBackup(){
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify({vaultkeep:1,profile:S.name,data:load()[S.name]})],{type:'application/json'}));
+  a.download=`vaultkeep-${S.name}.json`;a.click();toast('Encrypted backup downloaded. It is useless without your master password.');
+}
+async function importBackup(f){
+  if(!f)return;try{const j=JSON.parse(await f.text());if(!j.vaultkeep||!j.data)throw 0;
+  const all=load();let n=j.profile;while(all[n])n+=' (restored)';all[n]=j.data;store(all);render();alert('Restored as profile “'+n+'”.')}catch{alert('That file is not a Vaultkeep backup.')}
+}
+render();
+</script>
+</body>
+</html>
