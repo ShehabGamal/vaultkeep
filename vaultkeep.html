@@ -52,6 +52,9 @@ button:hover{filter:brightness(.96)}
 .hist{margin-top:.9rem;border:1px solid var(--line);border-radius:8px;padding:.5rem .8rem}
 .hist summary{cursor:pointer;color:var(--mute);font-size:.9rem}
 .hist .kv{grid-template-columns:170px 1fr auto}
+.cf{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr) auto auto;gap:.4rem;align-items:center;margin-top:.5rem}
+.cf-m{display:inline-flex;gap:.3rem;align-items:center;margin:0;white-space:nowrap}.cf-m input{width:auto}
+@media(max-width:520px){.cf{grid-template-columns:1fr auto}}
 #kit{display:none}
 @media print{
   @page{margin:18mm}
@@ -293,8 +296,8 @@ function genView(){
   <div class="row"><button onclick="S._gp=null;drawRight()">Regenerate</button><button class="p" onclick="copy(S._gp)">Copy</button></div>
   <p class="mute" style="font-size:.85rem">New entries use the mode selected here.</p></div>`;
 }
-function newEntry(svc=''){S.sel=null;S._f={service:svc,username:'',email:'',password:genAny(),recEmail:'',qa:'',notes:''};S.view='form';render()}
-function editEntry(){const e=sel();S._f={...e,history:[...(e.history||[])]};S.view='form';render()}
+function newEntry(svc=''){S.sel=null;S._f={service:svc,username:'',email:'',password:genAny(),recEmail:'',qa:'',notes:'',fields:[]};S.view='form';render()}
+function editEntry(){const e=sel();S._f={...e,history:[...(e.history||[])],fields:(e.fields||[]).map(c=>({...c}))};S.view='form';render()}
 const HISTORY_MAX=20;
 function historyHtml(e){
   const h=e.history||[];
@@ -312,12 +315,27 @@ function formView(){
   ${inp('recEmail','Recovery email or phone')}
   <label for="f_qa">Security questions (one per line: question | answer)</label><textarea id="f_qa">${esc(f.qa)}</textarea>
   <label for="f_notes">Notes</label><textarea id="f_notes">${esc(f.notes)}</textarea>
+  <h3 style="margin-top:1.2rem">Custom fields</h3><p class="mute" style="margin:0;font-size:.85rem">PINs, server ports, API tokens, license keys… Masked fields are hidden until you click Show.</p>
+  ${(f.fields||[]).map((c,i)=>`<div class="cf"><input id="cf_l_${i}" placeholder="Label, e.g. PIN" value="${esc(c.label)}" autocomplete="off" aria-label="Field ${i+1} label">
+  <input id="cf_v_${i}" class="mono" placeholder="Value" value="${esc(c.value)}" type="${c.masked?'password':'text'}" autocomplete="off" aria-label="Field ${i+1} value">
+  <label class="cf-m"><input id="cf_m_${i}" type="checkbox" ${c.masked?'checked':''} onchange="document.getElementById('cf_v_${i}').type=this.checked?'password':'text'">Masked</label>
+  <button class="d" onclick="readForm();S._f.fields.splice(${i},1);drawRight()" aria-label="Remove field ${i+1}">✕</button></div>`).join('')}
+  <button style="margin-top:.6rem" onclick="readForm();S._f.fields.push({label:'',value:'',masked:1});drawRight()">Add field</button>
   <div class="row" style="margin-top:1rem"><button class="p" onclick="saveEntry()">Save</button><button onclick="S.view=S._f.id?'detail':'home';render()">Cancel</button></div></div>`;
 }
+const FORM_KEYS=['service','username','email','password','recEmail','qa','notes'];
+// Pull the current form inputs back into S._f so re-rendering (e.g. adding a field) loses nothing.
+function readForm(){
+  const f=S._f,v=id=>document.getElementById(id);
+  FORM_KEYS.forEach(k=>{const el=v('f_'+k);if(el)f[k]=el.value});
+  f.fields=(f.fields||[]).map((c,i)=>v('cf_l_'+i)?{label:v('cf_l_'+i).value,value:v('cf_v_'+i).value,masked:v('cf_m_'+i).checked?1:0}:c);
+  return f;
+}
 async function saveEntry(){
-  const g=k=>document.getElementById('f_'+k).value;const f=S._f;
-  if(!g('service').trim()||!g('password'))return toast('Service and password are required.');
-  const e={...f,service:g('service').trim(),username:g('username').trim(),email:g('email').trim(),password:g('password'),recEmail:g('recEmail').trim(),qa:g('qa'),notes:g('notes')};
+  const f=readForm();
+  if(!f.service.trim()||!f.password)return toast('Service and password are required.');
+  const e={...f,service:f.service.trim(),username:f.username.trim(),email:f.email.trim(),recEmail:f.recEmail.trim(),
+    fields:f.fields.map(c=>({...c,label:c.label.trim()})).filter(c=>c.label||c.value)};
   const prev=e.id&&S.entries.find(x=>x.id===e.id);
   if(prev&&prev.password!==e.password){
     e.history=[{password:prev.password,changedAt:Date.now()},...(prev.history||[])].slice(0,HISTORY_MAX);e.pwChanged=Date.now();
@@ -335,6 +353,8 @@ function detailView(e){
   ${kv('Username',e.username,e.username?cp('username'):'')}${kv('Account email',e.email,e.email?cp('email'):'')}
   <div class="kv"><span>Password</span><span class="mono" id="pw">••••••••••••</span><span class="row"><button onclick="const p=$('#pw');p.textContent=p.dataset.s?'••••••••••••':sel().password;p.dataset.s=p.dataset.s?'':1">Show</button><button onclick="copy(sel().password)">Copy</button></span></div>
   <div class="row" style="margin-top:.6rem"><button onclick="checkPwned()" title="Sends only the first 5 characters of the password's SHA-1 hash to api.pwnedpasswords.com">Check pwned</button><span class="mute" style="font-size:.85rem">Optional online check. Your password never leaves this device.</span></div><div id="pwn" role="status"></div>
+  ${(e.fields||[]).map((c,i)=>`<div class="kv"><span>${esc(c.label||'Field '+(i+1))}</span><span class="mono" id="cfv_${i}">${c.masked?'••••••••':esc(c.value||'—')}</span><span class="row">
+  ${c.masked?`<button onclick="const p=$('#cfv_${i}');p.textContent=p.dataset.s?'••••••••':sel().fields[${i}].value;p.dataset.s=p.dataset.s?'':1">Show</button>`:''}${c.value?`<button onclick="copy(sel().fields[${i}].value)">Copy</button>`:''}</span></div>`).join('')}
   ${historyHtml(e)}
   ${open?`<div class="lock"><h3>Protected details <span class="mute" style="font-size:.8rem">(open until ${new Date(S.open[e.id]).toLocaleTimeString()})</span></h3>
   ${kv('Recovery',e.recEmail)}<div class="kv"><span>Security Q&amp;A</span><span class="mono" style="white-space:pre-wrap">${esc(e.qa||'—')}</span><span></span></div>${kv('Notes',e.notes)}
