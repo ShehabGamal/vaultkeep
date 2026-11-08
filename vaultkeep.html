@@ -123,9 +123,24 @@ async function copy(t){
   setTimeout(()=>navigator.clipboard.writeText('').catch(()=>{}),20000)}catch{toast('Copy blocked by the browser. Use Show instead.')}
 }
 function toast(m){const t=$('#toast');if(t){t.textContent=m;setTimeout(()=>{if(t.textContent===m)t.textContent=''},4000)}}
-function lockApp(){Object.assign(S,{key:null,master:'',entries:[],name:null,sel:null,open:{}});render()}
-['click','keydown','mousemove'].forEach(e=>addEventListener(e,()=>S.last=Date.now()));
-setInterval(()=>{if(S.key&&Date.now()-S.last>3*60000)lockApp()},5000);
+/* ---------- device settings (non-secret, stored unencrypted) ---------- */
+const SETTINGS_KEY='vaultkeep.settings';
+const LOCK_OPTS=[[1,'1 minute'],[3,'3 minutes'],[5,'5 minutes'],[15,'15 minutes'],[0,'Never']];
+const cfg=()=>{try{return{lockMin:3,escLock:1,...JSON.parse(localStorage.getItem(SETTINGS_KEY))}}catch{return{lockMin:3,escLock:1}}};
+const setCfg=p=>{try{localStorage.setItem(SETTINGS_KEY,JSON.stringify({...cfg(),...p}))}catch{}};
+const lockLabel=()=>{const m=cfg().lockMin;return m?`auto-locks after ${m} idle minute${m>1?'s':''}`:'auto-lock off'};
+function lockApp(){
+  Object.assign(S,{key:null,salt:null,master:'',entries:[],name:null,sel:null,view:'home',open:{},chal:null,_f:null,_gp:null});
+  $('#kit').innerHTML='';render();
+}
+['click','keydown','mousemove','touchstart'].forEach(e=>addEventListener(e,()=>S.last=Date.now(),{passive:true}));
+setInterval(()=>{const m=cfg().lockMin;if(S.key&&m&&Date.now()-S.last>m*60000)lockApp()},5000);
+addEventListener('keydown',e=>{
+  if(!S.key)return;
+  const t=e.target,typing=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.tagName==='SELECT'||t.isContentEditable);
+  if((e.ctrlKey||e.metaKey)&&!e.shiftKey&&!e.altKey&&e.key.toLowerCase()==='l'){e.preventDefault();lockApp();return}
+  if(e.key==='Escape'&&cfg().escLock){if(typing){t.blur();return}e.preventDefault();lockApp()}
+});
 
 /* ---------- views ---------- */
 function render(){
@@ -165,8 +180,8 @@ async function doCreate(){
   await seal();render();
 }
 function vault(){
-  return `<div class="top"><div><h2 style="margin:0">Vaultkeep</h2><span class="mute">Profile: ${esc(S.name)} · auto-locks after 3 idle minutes</span></div>
-  <div class="row"><button onclick="S.view='gen';drawRight()">Generator</button><button onclick="exportBackup()">Export backup</button><button onclick="printKit()">Emergency kit</button><button class="p" onclick="lockApp()">Lock</button></div></div>
+  return `<div class="top"><div><h2 style="margin:0">Vaultkeep</h2><span class="mute">Profile: ${esc(S.name)} · ${lockLabel()} · <kbd>Ctrl/⌘+L</kbd> locks</span></div>
+  <div class="row"><button onclick="S.view='gen';drawRight()">Generator</button><button onclick="S.view='settings';drawRight()">Settings</button><button onclick="exportBackup()">Export backup</button><button onclick="printKit()">Emergency kit</button><button class="p" onclick="lockApp()">Lock</button></div></div>
   <div class="grid"><div class="card"><h3>Do I have an account?</h3>
   <input id="q" placeholder="Type a service, e.g. claude.ai" oninput="check(this.value)" autocomplete="off">
   <div id="chk"></div><div class="row" style="margin-top:.8rem;justify-content:space-between"><h3 style="margin:0">Saved services</h3><button onclick="newEntry()">Add</button></div>
@@ -187,8 +202,18 @@ function check(v){
 function drawRight(){
   const r=$('#right');if(!r)return;
   $('#list').innerHTML=listHtml();
-  r.innerHTML=S.view==='gen'?genView():S.view==='form'?formView():(S.view==='detail'&&sel())?detailView(sel()):
+  r.innerHTML=S.view==='gen'?genView():S.view==='settings'?settingsView():S.view==='form'?formView():(S.view==='detail'&&sel())?detailView(sel()):
    `<div class="card"><h2>Welcome back</h2><p class="mute">Check a service on the left before you sign up anywhere. If you already have an account, you'll see it. If not, create one with a generated password and keep its recovery details together.</p></div>`;
+}
+function settingsView(){
+  const c=cfg();
+  return `<div class="card"><h2>Settings</h2><p class="mute">These preferences apply to this browser on this device.</p>
+  <h3>Security</h3>
+  <label for="s_lock">Auto-lock when idle</label><select id="s_lock" onchange="setCfg({lockMin:+this.value});S.last=Date.now();render()">
+  ${LOCK_OPTS.map(([v,l])=>`<option value="${v}" ${c.lockMin===v?'selected':''}>${l}</option>`).join('')}</select>
+  ${c.lockMin?'':'<p class="err" style="font-size:.85rem">With auto-lock off, anyone with access to this unlocked screen can read your vault.</p>'}
+  <label style="display:flex;gap:.5rem;align-items:center"><input type="checkbox" style="width:auto" ${c.escLock?'checked':''} onchange="setCfg({escLock:this.checked?1:0})">Lock immediately with the Escape key</label>
+  <p class="mute" style="font-size:.85rem">Ctrl+L (⌘+L on Mac) always locks the vault. Locking wipes the decrypted entries and key from memory.</p></div>`;
 }
 function genView(){
   const g=S.g,b=bits(),pw=S._gp||(S._gp=gen());
