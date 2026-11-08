@@ -49,10 +49,27 @@ button:hover{filter:brightness(.96)}
 .lock{border:1px dashed var(--line);border-radius:8px;padding:.9rem;margin-top:1rem}
 .pos{width:3.2rem;text-align:center;font-family:var(--mono)}
 .mute{color:var(--mute)}.err{color:var(--warn)}
+#kit{display:none}
+@media print{
+  @page{margin:18mm}
+  html,body{background:#fff!important;color:#000!important;font:12pt/1.45 var(--serif)}
+  #app{display:none!important}
+  #kit{display:block}
+  #kit h1{font-size:22pt;margin:0 0 .2em}
+  #kit .k-sub{color:#444;margin:0 0 1.2em}
+  #kit table{width:100%;border-collapse:collapse;margin:.6em 0 1.2em}
+  #kit td{border:1px solid #000;padding:.55em .7em;vertical-align:top}
+  #kit td:first-child{width:34%;font-weight:600}
+  #kit .k-blank{height:2.6em}
+  #kit .k-box{border:2px solid #000;padding:.8em 1em;margin:1em 0;break-inside:avoid}
+  #kit ol{padding-left:1.3em}#kit li{margin:.3em 0}
+  #kit .k-foot{margin-top:2em;font-size:9pt;color:#444;border-top:1px solid #000;padding-top:.5em}
+}
 </style>
 </head>
 <body>
 <div class="wrap" id="app"></div>
+<div id="kit" aria-hidden="true"></div>
 <script>
 const enc=new TextEncoder(),dec=new TextDecoder();
 const $=s=>document.querySelector(s);
@@ -74,7 +91,7 @@ async function derive(pw,salt){
 async function seal(){
   const iv=crypto.getRandomValues(new Uint8Array(12));
   const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv},S.key,enc.encode(JSON.stringify(S.entries)));
-  const all=load();all[S.name]={salt:b64(S.salt),iv:b64(iv),ct:b64(ct)};store(all);
+  const all=load();all[S.name]={salt:b64(S.salt),iv:b64(iv),ct:b64(ct),created:all[S.name]?.created||Date.now()};store(all);
 }
 async function unlockProfile(name,pw){
   const rec=load()[name];const salt=ub64(rec.salt);const key=await derive(pw,salt);
@@ -149,7 +166,7 @@ async function doCreate(){
 }
 function vault(){
   return `<div class="top"><div><h2 style="margin:0">Vaultkeep</h2><span class="mute">Profile: ${esc(S.name)} · auto-locks after 3 idle minutes</span></div>
-  <div class="row"><button onclick="S.view='gen';drawRight()">Generator</button><button onclick="exportBackup()">Export backup</button><button class="p" onclick="lockApp()">Lock</button></div></div>
+  <div class="row"><button onclick="S.view='gen';drawRight()">Generator</button><button onclick="exportBackup()">Export backup</button><button onclick="printKit()">Emergency kit</button><button class="p" onclick="lockApp()">Lock</button></div></div>
   <div class="grid"><div class="card"><h3>Do I have an account?</h3>
   <input id="q" placeholder="Type a service, e.g. claude.ai" oninput="check(this.value)" autocomplete="off">
   <div id="chk"></div><div class="row" style="margin-top:.8rem;justify-content:space-between"><h3 style="margin:0">Saved services</h3><button onclick="newEntry()">Add</button></div>
@@ -235,6 +252,23 @@ function exportBackup(){
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify({vaultkeep:1,profile:S.name,data:load()[S.name]})],{type:'application/json'}));
   a.download=`vaultkeep-${S.name}.json`;a.click();toast('Encrypted backup downloaded. It is useless without your master password.');
 }
+/* ---------- emergency kit ---------- */
+function kitHtml(){
+  const rec=load()[S.name]||{},made=rec.created?new Date(rec.created).toLocaleDateString():'Not recorded (profile predates this feature)';
+  const row=(l,v)=>`<tr><td>${l}</td><td${v?'':' class="k-blank"'}>${v?esc(v):''}</td></tr>`;
+  return `<h1>Vaultkeep Emergency Kit</h1><p class="k-sub">Keep this sheet somewhere safe and offline. Anyone holding it and your backup file can open your vault.</p>
+  <table>${row('Profile name',S.name)}${row('Profile created',made)}${row('Kit printed',new Date().toLocaleString())}${row('App','Vaultkeep (vaultkeep.html), runs offline in any modern browser')}</table>
+  <div class="k-box"><strong>Master password</strong> (write by hand, never type it into a file)<table>${row('Master password','')}${row('Hint (optional)','')}</table></div>
+  <div class="k-box"><strong>Where things are kept</strong><table>${row('Encrypted backup file location','')}${row('Copy of vaultkeep.html location','')}${row('Physical location of this kit','')}</table></div>
+  <h3>How to recover your vault</h3><ol>
+  <li>Open a copy of <em>vaultkeep.html</em> in a modern browser (Chrome, Firefox, Edge, Safari). No internet connection is needed.</li>
+  <li>On the start screen choose <em>Restore a backup</em> and select your <em>vaultkeep-${esc(S.name)}.json</em> file.</li>
+  <li>Select the restored profile and enter the master password written above.</li>
+  <li>Export a fresh backup after recovery and store it in at least two places.</li></ol>
+  <p><strong>There is no password reset.</strong> Without the master password the backup cannot be decrypted by anyone, including the Vaultkeep authors.</p>
+  <p class="k-foot">Generated locally by Vaultkeep. This sheet contains no stored passwords.</p>`;
+}
+function printKit(){const k=$('#kit');k.innerHTML=kitHtml();window.print();setTimeout(()=>k.innerHTML='',1000)}
 async function importBackup(f){
   if(!f)return;try{const j=JSON.parse(await f.text());if(!j.vaultkeep||!j.data)throw 0;
   const all=load();let n=j.profile;while(all[n])n+=' (restored)';all[n]=j.data;store(all);render();alert('Restored as profile “'+n+'”.')}catch{alert('That file is not a Vaultkeep backup.')}
