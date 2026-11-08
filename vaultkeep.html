@@ -49,6 +49,9 @@ button:hover{filter:brightness(.96)}
 .lock{border:1px dashed var(--line);border-radius:8px;padding:.9rem;margin-top:1rem}
 .pos{width:3.2rem;text-align:center;font-family:var(--mono)}
 .mute{color:var(--mute)}.err{color:var(--warn)}
+.hist{margin-top:.9rem;border:1px solid var(--line);border-radius:8px;padding:.5rem .8rem}
+.hist summary{cursor:pointer;color:var(--mute);font-size:.9rem}
+.hist .kv{grid-template-columns:170px 1fr auto}
 #kit{display:none}
 @media print{
   @page{margin:18mm}
@@ -244,7 +247,15 @@ function genView(){
   <div class="row"><button onclick="S._gp=null;drawRight()">Regenerate</button><button class="p" onclick="copy(S._gp)">Copy</button></div></div>`;
 }
 function newEntry(svc=''){S.sel=null;S._f={service:svc,username:'',email:'',password:gen(),recEmail:'',qa:'',notes:''};S.view='form';render()}
-function editEntry(){S._f={...sel()};S.view='form';render()}
+function editEntry(){const e=sel();S._f={...e,history:[...(e.history||[])]};S.view='form';render()}
+const HISTORY_MAX=20;
+function historyHtml(e){
+  const h=e.history||[];
+  return `<details class="hist"><summary>Password history (${h.length})</summary>
+  ${h.length?h.map((x,i)=>`<div class="kv"><span>${new Date(x.changedAt).toLocaleString()}</span><span class="mono" id="ph_${i}">••••••••••••</span><span class="row">
+  <button onclick="const p=$('#ph_${i}');p.textContent=p.dataset.s?'••••••••••••':sel().history[${i}].password;p.dataset.s=p.dataset.s?'':1">Show</button><button onclick="copy(sel().history[${i}].password)">Copy</button></span></div>`).join('')
+  :'<p class="mute" style="font-size:.85rem">Previous passwords appear here after you change this one. Useful if a password change fails on the website.</p>'}</details>`;
+}
 function formView(){
   const f=S._f,editing=!!f.id;
   const inp=(k,l,t='text')=>`<label for="f_${k}">${l}</label><input id="f_${k}" type="${t}" value="${esc(f[k])}" autocomplete="off">`;
@@ -260,7 +271,11 @@ async function saveEntry(){
   const g=k=>document.getElementById('f_'+k).value;const f=S._f;
   if(!g('service').trim()||!g('password'))return toast('Service and password are required.');
   const e={...f,service:g('service').trim(),username:g('username').trim(),email:g('email').trim(),password:g('password'),recEmail:g('recEmail').trim(),qa:g('qa'),notes:g('notes')};
-  if(e.id)S.entries=S.entries.map(x=>x.id===e.id?e:x);else{e.id=uid();e.created=Date.now();S.entries.push(e)}
+  const prev=e.id&&S.entries.find(x=>x.id===e.id);
+  if(prev&&prev.password!==e.password){
+    e.history=[{password:prev.password,changedAt:Date.now()},...(prev.history||[])].slice(0,HISTORY_MAX);e.pwChanged=Date.now();
+  }
+  if(e.id)S.entries=S.entries.map(x=>x.id===e.id?e:x);else{e.id=uid();e.created=e.pwChanged=Date.now();e.history=[];S.entries.push(e)}
   await seal();S.sel=e.id;S.view='detail';render();toast('Saved and encrypted.');
 }
 async function delEntry(){if(!confirm('Delete this service permanently?'))return;S.entries=S.entries.filter(e=>e.id!==S.sel);S.sel=null;S.view='home';await seal();render()}
@@ -273,6 +288,7 @@ function detailView(e){
   ${kv('Username',e.username,e.username?cp('username'):'')}${kv('Account email',e.email,e.email?cp('email'):'')}
   <div class="kv"><span>Password</span><span class="mono" id="pw">••••••••••••</span><span class="row"><button onclick="const p=$('#pw');p.textContent=p.dataset.s?'••••••••••••':sel().password;p.dataset.s=p.dataset.s?'':1">Show</button><button onclick="copy(sel().password)">Copy</button></span></div>
   <div class="row" style="margin-top:.6rem"><button onclick="checkPwned()" title="Sends only the first 5 characters of the password's SHA-1 hash to api.pwnedpasswords.com">Check pwned</button><span class="mute" style="font-size:.85rem">Optional online check. Your password never leaves this device.</span></div><div id="pwn" role="status"></div>
+  ${historyHtml(e)}
   ${open?`<div class="lock"><h3>Protected details <span class="mute" style="font-size:.8rem">(open until ${new Date(S.open[e.id]).toLocaleTimeString()})</span></h3>
   ${kv('Recovery',e.recEmail)}<div class="kv"><span>Security Q&amp;A</span><span class="mono" style="white-space:pre-wrap">${esc(e.qa||'—')}</span><span></span></div>${kv('Notes',e.notes)}
   <button onclick="delete S.open['${e.id}'];drawRight()">Hide now</button></div>`:challenge(e)}</div>`;
