@@ -117,6 +117,36 @@ function gen(o=S.g){
 }
 const bits=(o=S.g)=>Math.round(o.len*Math.log2(Math.max(2,genSets(o).join('').length)));
 const strength=b=>b<60?'Weak':b<80?'Fair':b<110?'Strong':'Excellent';
+// Character-pool estimate for an arbitrary password (upper bound; repeated chars reduce it).
+function pwBits(p){
+  p=String(p||'');if(!p)return 0;let n=0;
+  if(/[a-z]/.test(p))n+=26;if(/[A-Z]/.test(p))n+=26;if(/[0-9]/.test(p))n+=10;if(/[^a-zA-Z0-9]/.test(p))n+=33;
+  const uniq=new Set(p).size;return Math.round(Math.min(p.length,uniq*1.5)*Math.log2(Math.max(2,n)));
+}
+
+/* ---------- vault health audit (fully offline) ---------- */
+const STALE_DAYS=180;
+function audit(){
+  const by=new Map();S.entries.forEach(e=>{if(e.password){const a=by.get(e.password)||[];a.push(e);by.set(e.password,a)}});
+  const reused=[...by.values()].filter(a=>a.length>1);
+  const weak=S.entries.filter(e=>pwBits(e.password)<60);
+  const noId=S.entries.filter(e=>!e.username&&!e.email);
+  const cut=Date.now()-STALE_DAYS*864e5;
+  const stale=S.entries.filter(e=>(e.pwChanged||e.created||0)<cut);
+  const bad=new Set([...reused.flat(),...weak,...stale].map(e=>e.id));
+  const score=S.entries.length?Math.round(100*(S.entries.length-bad.size)/S.entries.length):100;
+  return{reused,weak,noId,stale,score};
+}
+function auditView(){
+  const a=audit(),link=e=>`<button class="item" onclick="S.sel='${e.id}';S.view='detail';render()">${esc(e.service)}<small>${esc(e.username||e.email||'')}</small></button>`;
+  const sec=(t,d,items,body)=>`<div class="note ${items.length?'no':'yes'}"><strong>${t} (${items.length})</strong><div class="mute" style="font-size:.85rem">${d}</div>${items.length?body:''}</div>`;
+  return `<div class="card"><h2>Vault health</h2><p class="mute">Analysed on this device only. Nothing is sent anywhere.</p>
+  <div class="bar"><i style="width:${a.score}%"></i></div><p><strong>${a.score}%</strong> of your ${S.entries.length} entries have no password issues.</p>
+  ${sec('Reused passwords','The same password is used on more than one service. One breach exposes all of them.',a.reused,a.reused.map((g,i)=>`<div style="margin-top:.5rem"><span class="mute">Group ${i+1}</span>${g.map(link).join('')}</div>`).join(''))}
+  ${sec('Weak passwords','Estimated under 60 bits of entropy. Replace with a generated password.',a.weak,a.weak.map(e=>link(e).replace('</small>',` · ~${pwBits(e.password)} bits</small>`)).join(''))}
+  ${sec('Not changed in '+STALE_DAYS+'+ days','Old passwords are more likely to have leaked. Consider rotating them.',a.stale,a.stale.map(e=>link(e).replace('</small>',` · since ${new Date(e.pwChanged||e.created).toLocaleDateString()}</small>`)).join(''))}
+  ${sec('Missing username or email','You may not know which account this password belongs to.',a.noId,a.noId.map(link).join(''))}</div>`;
+}
 
 /* ---------- helpers ---------- */
 const norm=s=>String(s).toLowerCase().trim().replace(/^https?:\/\//,'').replace(/^www\./,'').replace(/\/.*$/,'').replace(/\.(com|org|net|io|ai|app|co)$/,'');
@@ -203,7 +233,7 @@ async function doCreate(){
 }
 function vault(){
   return `<div class="top"><div><h2 style="margin:0">Vaultkeep</h2><span class="mute">Profile: ${esc(S.name)} · ${lockLabel()} · <kbd>Ctrl/⌘+L</kbd> locks</span></div>
-  <div class="row"><button onclick="S.view='gen';drawRight()">Generator</button><button onclick="S.view='settings';drawRight()">Settings</button><button onclick="exportBackup()">Export backup</button><button onclick="printKit()">Emergency kit</button><button class="p" onclick="lockApp()">Lock</button></div></div>
+  <div class="row"><button onclick="S.view='gen';drawRight()">Generator</button><button onclick="S.view='audit';drawRight()">Health</button><button onclick="S.view='settings';drawRight()">Settings</button><button onclick="exportBackup()">Export backup</button><button onclick="printKit()">Emergency kit</button><button class="p" onclick="lockApp()">Lock</button></div></div>
   <div class="grid"><div class="card"><h3>Do I have an account?</h3>
   <input id="q" placeholder="Type a service, e.g. claude.ai" oninput="check(this.value)" autocomplete="off">
   <div id="chk"></div><div class="row" style="margin-top:.8rem;justify-content:space-between"><h3 style="margin:0">Saved services</h3><button onclick="newEntry()">Add</button></div>
@@ -224,7 +254,7 @@ function check(v){
 function drawRight(){
   const r=$('#right');if(!r)return;
   $('#list').innerHTML=listHtml();
-  r.innerHTML=S.view==='gen'?genView():S.view==='settings'?settingsView():S.view==='form'?formView():(S.view==='detail'&&sel())?detailView(sel()):
+  r.innerHTML=S.view==='gen'?genView():S.view==='settings'?settingsView():S.view==='audit'?auditView():S.view==='form'?formView():(S.view==='detail'&&sel())?detailView(sel()):
    `<div class="card"><h2>Welcome back</h2><p class="mute">Check a service on the left before you sign up anywhere. If you already have an account, you'll see it. If not, create one with a generated password and keep its recovery details together.</p></div>`;
 }
 function settingsView(){
