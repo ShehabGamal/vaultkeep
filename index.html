@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vaultkeep</title>
+<!--
+  Vaultkeep: open-source, local-first password manager (single file, no server).
+  Crypto: PBKDF2-SHA256 (600k iterations) -> AES-256-GCM via the browser's Web Crypto API.
+  Each profile has its own master password and its own encrypted vault in IndexedDB (migrated automatically from older localStorage versions).
+  License: MIT. Audit it, fork it, improve it.
+-->
+</head>
+<body>
+<div class="wrap" id="app"></div>
+<div id="kit" aria-hidden="true"></div>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>

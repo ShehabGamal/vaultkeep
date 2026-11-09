@@ -1,0 +1,27 @@
+{
+  "name": "vaultkeep",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local-first zero-knowledge password manager",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "node --import tsx --test tests/core.test.ts"
+  },
+  "dependencies": {
+    "preact": "^10.29.8"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.6",
+    "@types/node": "^20.19.43",
+    "fake-indexeddb": "^6.2.8",
+    "tsx": "^4.23.15",
+    "typescript": "5.7",
+    "vite": "^6.4.6",
+    "vite-plugin-singlefile": "^2.3.4"
+  }
+}
