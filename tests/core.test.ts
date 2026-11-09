@@ -33,10 +33,11 @@ describe('encoding', () => {
   });
 });
 
-describe('crypto (PBKDF2 + AES-GCM)', () => {
-  it('seals and decrypts entries and rejects wrong passwords', async () => {
+describe('crypto (Argon2id + PBKDF2 legacy + AES-GCM)', () => {
+  it('seals and decrypts entries with Argon2id, supports legacy PBKDF2 records, and rejects wrong passwords', async () => {
     const salt = newSalt();
-    const key = await deriveKey('correct-horse-battery-staple', salt);
+    const { key, kdf } = await deriveKey('correct-horse-battery-staple', salt, { kdf: 'argon2id', m: 4096, t: 2, p: 1 });
+    assert.equal(kdf.kdf, 'argon2id');
     const sample: Entry[] = [
       {
         id: '1',
@@ -51,9 +52,17 @@ describe('crypto (PBKDF2 + AES-GCM)', () => {
       },
     ];
     const { iv, ct } = await encryptEntries(key, sample);
-    const unlocked = await decryptRecord({ salt: b64(salt), iv, ct }, 'correct-horse-battery-staple');
+    const unlocked = await decryptRecord({ salt: b64(salt), iv, ct, ...kdf }, 'correct-horse-battery-staple');
+    assert.equal(unlocked.kdf.kdf, 'argon2id');
     assert.deepEqual(unlocked.entries, sample);
-    await assert.rejects(() => decryptRecord({ salt: b64(salt), iv, ct }, 'wrong-password'));
+    await assert.rejects(() => decryptRecord({ salt: b64(salt), iv, ct, ...kdf }, 'wrong-password'));
+
+    // Legacy PBKDF2 record without kdf field
+    const legacyKey = (await deriveKey('legacy-pw-123456', salt, { kdf: 'pbkdf2' })).key;
+    const legacyEnc = await encryptEntries(legacyKey, sample);
+    const legacyUnlocked = await decryptRecord({ salt: b64(salt), ...legacyEnc }, 'legacy-pw-123456');
+    assert.equal(legacyUnlocked.kdf.kdf, 'pbkdf2');
+    assert.deepEqual(legacyUnlocked.entries, sample);
   });
 });
 

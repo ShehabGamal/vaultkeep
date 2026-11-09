@@ -9,7 +9,8 @@ import { cfg, lockLabel, LOCK_OPTS, setCfg } from './lib/settings';
 import { initStorage, load, store, type StorageKind } from './lib/storage';
 import { matchFilter, norm, parseTags, TYPE_FIELDS, TYPES } from './lib/tags';
 import { parseTotp, totpCode } from './lib/totp';
-import type { CustomField, Entry, EntryType, Flag, ProfileRecord } from './lib/types';
+import type { CustomField, Entry, EntryType, Flag, KdfParams, ProfileRecord } from './lib/types';
+import { DEFAULT_KDF } from './lib/crypto';
 import { WORDS } from './lib/words';
 
 const $ = <T extends Element = HTMLElement>(s: string): T | null => document.querySelector<T>(s);
@@ -41,6 +42,7 @@ export interface AppState {
   name: string | null;
   key: CryptoKey | null;
   salt: Uint8Array<ArrayBuffer> | null;
+  kdf: KdfParams;
   master: string;
   entries: Entry[];
   sel: string | null;
@@ -62,6 +64,7 @@ export const S: AppState = {
   name: null,
   key: null,
   salt: null,
+  kdf: { ...DEFAULT_KDF },
   master: '',
   entries: [],
   sel: null,
@@ -82,7 +85,13 @@ async function seal(): Promise<void> {
   if (!S.key || !S.name || !S.salt) return;
   const { iv, ct } = await encryptEntries(S.key, S.entries);
   const all = load();
-  all[S.name] = { salt: b64(S.salt), iv, ct, created: all[S.name]?.created || Date.now() };
+  all[S.name] = {
+    salt: b64(S.salt),
+    iv,
+    ct,
+    created: all[S.name]?.created || Date.now(),
+    ...S.kdf,
+  };
   try {
     await store(all);
   } catch (err) {
@@ -95,11 +104,26 @@ async function seal(): Promise<void> {
 async function unlockProfile(name: string, pw: string): Promise<void> {
   const rec = load()[name];
   if (!rec) throw new Error('Profile not found');
-  const { key, salt, entries } = await decryptRecord(rec, pw);
+  const { key, salt, kdf, entries } = await decryptRecord(rec, pw);
+  let activeKey = key;
+  let activeSalt = salt;
+  let activeKdf = kdf;
+  let upgraded = false;
+  if (kdf.kdf !== 'argon2id') {
+    const nextSalt = newSalt();
+    const derived = await deriveKey(pw, nextSalt, DEFAULT_KDF);
+    if (derived.kdf.kdf === 'argon2id') {
+      activeKey = derived.key;
+      activeSalt = nextSalt;
+      activeKdf = derived.kdf;
+      upgraded = true;
+    }
+  }
   Object.assign(S, {
     name,
-    key,
-    salt,
+    key: activeKey,
+    salt: activeSalt,
+    kdf: activeKdf,
     master: pw,
     entries,
     sel: null,
@@ -109,6 +133,7 @@ async function unlockProfile(name: string, pw: string): Promise<void> {
     lockUntil: 0,
     last: Date.now(),
   });
+  if (upgraded) await seal();
 }
 
 const sel = (): Entry | undefined => S.entries.find((e) => e.id === S.sel);
@@ -367,7 +392,8 @@ async function doCreate(): Promise<void> {
   }
   e.textContent = 'Creating…';
   const salt = newSalt();
-  Object.assign(S, { name: n, salt, key: await deriveKey(a, salt), master: a, entries: [], sel: null, view: 'home', open: {} });
+  const { key, kdf } = await deriveKey(a, salt, DEFAULT_KDF);
+  Object.assign(S, { name: n, salt, key, kdf, master: a, entries: [], sel: null, view: 'home', open: {} });
   await seal();
   render();
   await flushPending();
@@ -485,8 +511,8 @@ function settingsView(): string {
   <label style="display:flex;gap:.5rem;align-items:center"><input type="checkbox" style="width:auto" ${c.escLock ? 'checked' : ''} onchange="setCfg({escLock:this.checked?1:0})">Lock immediately with the Escape key</label>
   <p class="mute" style="font-size:.85rem">Ctrl+L (⌘+L on Mac) always locks the vault. Locking wipes the decrypted entries and key from memory.</p>
   <h3 style="margin-top:1.2rem">Import</h3>${importHtml()}
-  <h3 style="margin-top:1.2rem">Storage</h3>
-  <p class="mute" style="font-size:.85rem">${S.storage === 'indexeddb' ? 'Encrypted vaults are stored in IndexedDB on this device.' : 'IndexedDB is unavailable here, so vaults are stored in localStorage (about 5 MB limit). Export backups regularly.'}</p></div>`;
+  <h3 style="margin-top:1.2rem">Storage &amp; cryptography</h3>
+  <p class="mute" style="font-size:.85rem">${S.storage === 'indexeddb' ? 'Encrypted vaults are stored in IndexedDB on this device.' : 'IndexedDB is unavailable here, so vaults are stored in localStorage (about 5 MB limit). Export backups regularly.'} Key derivation: ${S.kdf.kdf === 'argon2id' ? `Argon2id (${Math.round((S.kdf.m || 65536) / 1024)} MiB, t=${S.kdf.t || 3}, p=${S.kdf.p || 4})` : `PBKDF2-SHA256 (${(S.kdf.t || 600000).toLocaleString()} iterations)`} → AES-256-GCM.</p></div>`;
 }
 
 function genView(): string {

@@ -13,6 +13,7 @@
     "test": "node --import tsx --test tests/core.test.ts"
   },
   "dependencies": {
+    "hash-wasm": "^4.13.0",
     "preact": "^10.29.8"
   },
   "devDependencies": {

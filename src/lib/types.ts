@@ -1,5 +1,16 @@
 export type EntryType = 'login' | 'note' | 'card' | 'api';
 export type Flag = 0 | 1;
+export type KdfKind = 'argon2id' | 'pbkdf2';
+
+export interface KdfParams {
+  kdf: KdfKind;
+  /** Argon2id memory size in KiB (default 65536 = 64 MiB). */
+  m?: number;
+  /** Argon2id time cost / iterations (default 3) or PBKDF2 iterations (default 600000). */
+  t?: number;
+  /** Argon2id parallelism / lanes (default 4). */
+  p?: number;
+}
 
 export interface CustomField {
   label: string;
@@ -41,6 +52,14 @@ export interface ProfileRecord {
   iv: string;
   ct: string;
   created?: number;
+  /** Key derivation algorithm ('argon2id' for new vaults; omitted or 'pbkdf2' for legacy vaults). */
+  kdf?: KdfKind;
+  /** Argon2id memory size in KiB. */
+  m?: number;
+  /** Argon2id iterations (or PBKDF2 iterations when kdf === 'pbkdf2'). */
+  t?: number;
+  /** Argon2id parallelism. */
+  p?: number;
 }
 
 export type ProfileMap = Record<string, ProfileRecord>;
