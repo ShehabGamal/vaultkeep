@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default minimal capabilities for the Vaultkeep main window",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
